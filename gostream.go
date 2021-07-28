@@ -46,9 +46,8 @@ func getSchema(cfg *redisStreamConfig) string {
 type redisStreamConfig struct {
 	outboxTableName string
 	useOutboxTable  bool
-	sqlDriverName string
+	sqlDriverName   string
 }
-
 
 func WithUseOutboxTable(useOutboxTable bool) RedisStreamOption {
 	return func(cfg *redisStreamConfig) error {
@@ -91,23 +90,22 @@ type RedisStream struct {
 }
 
 type OutboxTable struct {
-	IdempotencyKey string `json:"idempotency_key"`
-	Stream string `db:"stream" json:"stream_name"`
-	Payload []byte `db:"payload" json:"payload"`
-	CreatedAt time.Time `db:"created_at" json:"created_at"`
+	IdempotencyKey string    `json:"idempotency_key"`
+	Stream         string    `db:"stream" json:"stream_name"`
+	Payload        []byte    `db:"payload" json:"payload"`
+	CreatedAt      time.Time `db:"created_at" json:"created_at"`
 }
 
-
 type Message struct {
-	ID              string `json:"uuid"`
-	IdempotencyKey string `json:"idempotency_key"`
-	Stream          string `db:"stream" json:"stream_name"`
-	Payload         []byte `db:"payload" json:"payload"`
-	CreatedAt       time.Time `db:"created_at" json:"created_at"`
+	ID             string    `json:"uuid"`
+	IdempotencyKey string    `json:"idempotency_key"`
+	Stream         string    `db:"stream" json:"stream_name"`
+	Payload        []byte    `db:"payload" json:"payload"`
+	CreatedAt      time.Time `db:"created_at" json:"created_at"`
 }
 
 func (r *RedisStream) triggerEmptyOutbox() {
-	r.emptyOutbox<-struct{}{}
+	r.emptyOutbox <- struct{}{}
 }
 
 func (r *RedisStream) PublishMessage(ctx context.Context, tx *sql.Tx, streamName string, payload []byte) (string, error) {
@@ -118,7 +116,10 @@ func (r *RedisStream) PublishMessage(ctx context.Context, tx *sql.Tx, streamName
 	}
 	_, err = tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (idempotency_key, stream, payload, created_at) VALUES ($1, $2, $3, $4);", r.cfg.outboxTableName), idempotencyKey.String(), streamName, payload, createdAt)
 	if err == nil {
-		go r.triggerEmptyOutbox()
+		go func() {
+			time.Sleep(time.Millisecond * 50)
+			r.triggerEmptyOutbox()
+		}()
 	}
 	return idempotencyKey.String(), err
 }
@@ -130,7 +131,7 @@ func (r *RedisStream) emptyOutboxRun(ctx context.Context) {
 		if err != nil {
 			r.log.Error("Backoff error", zap.Error(err))
 		}
-		backoff = retry.WithCappedDuration(time.Second * 5, backoff)
+		backoff = retry.WithCappedDuration(time.Second*5, backoff)
 
 		err = retry.Do(ctx, backoff, func(ctx context.Context) error {
 			// TODO: get message
@@ -150,11 +151,11 @@ func (r *RedisStream) emptyOutboxRun(ctx context.Context) {
 				r.log.Error("Error getting the row", zap.Error(err))
 				return err
 			}
-// 			s.log.Info("Found a message, sending to Redis now", zap.Reflect("entry", entry))
+			// 			s.log.Info("Found a message, sending to Redis now", zap.Reflect("entry", entry))
 			err = r.redisClient.XAdd(ctx, &redis.XAddArgs{Stream: entry.Stream, Values: map[string]interface{}{
 				"idempotency_key": entry.IdempotencyKey,
-				"payload": base64.StdEncoding.EncodeToString(entry.Payload),
-				"created_at": entry.CreatedAt.Unix(),
+				"payload":         base64.StdEncoding.EncodeToString(entry.Payload),
+				"created_at":      entry.CreatedAt.Unix(),
 			}}).Err()
 			if err != nil {
 				return err
@@ -178,19 +179,19 @@ func (r *RedisStream) emptyOutboxLoop() {
 
 	for {
 		select {
-			case <-ticker.C:
-				ctx, cancel := context.WithTimeout(r.ctx, duration * 10)
-				r.emptyOutboxRun(ctx)
-				cancel()
-				ticker.Reset(duration)
-			case <- r.emptyOutbox:
-				ctx, cancel := context.WithTimeout(r.ctx, duration * 10)
-				r.emptyOutboxRun(ctx)
-				cancel()
-				ticker.Reset(duration)
-			case <-r.ctx.Done():
-				r.log.Info("Stopping RedisStream.emptyOutbox ticker")
-				return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(r.ctx, duration*10)
+			r.emptyOutboxRun(ctx)
+			cancel()
+			ticker.Reset(duration)
+		case <-r.emptyOutbox:
+			ctx, cancel := context.WithTimeout(r.ctx, duration*10)
+			r.emptyOutboxRun(ctx)
+			cancel()
+			ticker.Reset(duration)
+		case <-r.ctx.Done():
+			r.log.Info("Stopping RedisStream.emptyOutbox ticker")
+			return
 		}
 	}
 }
@@ -231,7 +232,7 @@ func (r *RedisStream) Subscribe(ctx context.Context, group string, stream string
 		payload, _ := base64.StdEncoding.DecodeString(msg.Values["payload"].(string))
 		ts, _ := strconv.ParseInt(msg.Values["created_at"].(string), 10, 64)
 		backoff, _ := retry.NewConstant(time.Second)
-		err = retry.Do(ctx, retry.WithMaxDuration(time.Second * 10, backoff), func(ctx context.Context) error {
+		err = retry.Do(ctx, retry.WithMaxDuration(time.Second*10, backoff), func(ctx context.Context) error {
 			if err := f(&Message{
 				ID:             msg.ID,
 				IdempotencyKey: msg.Values["idempotency_key"].(string),
@@ -245,7 +246,7 @@ func (r *RedisStream) Subscribe(ctx context.Context, group string, stream string
 		})
 		if err == nil {
 			backoff, _ := retry.NewConstant(time.Second)
-			if err := retry.Do(ctx, retry.WithMaxDuration(time.Second * 10, backoff), func(ctx context.Context) error {
+			if err := retry.Do(ctx, retry.WithMaxDuration(time.Second*10, backoff), func(ctx context.Context) error {
 				return retry.RetryableError(r.redisClient.XAck(ctx, streamName, group, msg.ID).Err())
 			}); err != nil {
 				r.log.Error("Could not ack the redis message",
@@ -256,7 +257,7 @@ func (r *RedisStream) Subscribe(ctx context.Context, group string, stream string
 			}
 			r.log.Info("Message processed successfuly", zap.String("stream", streamName),
 				zap.String("group", group),
-				zap.String("msg.ID", msg.ID),)
+				zap.String("msg.ID", msg.ID))
 		} else {
 			r.log.Error("Could not process message after several retries",
 				zap.String("stream", streamName),
@@ -276,9 +277,9 @@ func NewRedisStream(ctx context.Context, clientID string, redisHostPort string, 
 
 	// default config
 	cfg := &redisStreamConfig{
-		useOutboxTable: true,
+		useOutboxTable:  true,
 		outboxTableName: "redis_outbox",
-		sqlDriverName: "postgres",
+		sqlDriverName:   "postgres",
 	}
 	for _, option := range options {
 		if err := option(cfg); err != nil {
@@ -287,15 +288,15 @@ func NewRedisStream(ctx context.Context, clientID string, redisHostPort string, 
 	}
 
 	r := &RedisStream{
-		ctx: ctx,
+		ctx:      ctx,
 		clientID: clientID,
-		db: db,
-		cfg: cfg,
-		log: log.Named("RedisStream"),
+		db:       db,
+		cfg:      cfg,
+		log:      log.Named("RedisStream"),
 		redisClient: redis.NewClient(&redis.Options{
-			Addr:     redisHostPort,
+			Addr: redisHostPort,
 		}),
-		emptyOutbox: make(chan struct{}),
+		emptyOutbox:      make(chan struct{}),
 		schemaCreateOnce: sync.Once{},
 	}
 	r.init()
